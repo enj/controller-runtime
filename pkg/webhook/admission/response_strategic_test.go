@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 
@@ -484,10 +485,7 @@ func (o *strategicTestObject) DeepCopyObject() runtime.Object {
 	}
 	result.Spec.Containers = slices.Clone(o.Spec.Containers)
 	result.Spec.Atomic = slices.Clone(o.Spec.Atomic)
-	result.Spec.Labels = make(map[string]string, len(o.Spec.Labels))
-	for key, value := range o.Spec.Labels {
-		result.Spec.Labels[key] = value
-	}
+	result.Spec.Labels = maps.Clone(o.Spec.Labels)
 	return &result
 }
 
