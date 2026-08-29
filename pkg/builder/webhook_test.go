@@ -161,6 +161,9 @@ func runTests(admissionReviewVersion string) {
 		Entry("Defaulter", func(b *WebhookBuilder[*TestDefaulterObject]) {
 			b.WithDefaulter(&testDefaulter{})
 		}),
+		Entry("Mutator", func(b *WebhookBuilder[*TestDefaulterObject]) {
+			b.WithMutator(&testMutator{})
+		}),
 	)
 
 	DescribeTable("should scaffold a custom defaulting webhook with a custom path",
@@ -245,6 +248,9 @@ func runTests(admissionReviewVersion string) {
 		Entry("Defaulter", func(b *WebhookBuilder[*TestDefaulterObject]) {
 			b.WithDefaulter(&testDefaulter{})
 		}),
+		Entry("Mutator", func(b *WebhookBuilder[*TestDefaulterObject]) {
+			b.WithMutator(&testMutator{})
+		}),
 	)
 
 	DescribeTable("should scaffold a custom defaulting webhook which recovers from panics",
@@ -312,6 +318,9 @@ func runTests(admissionReviewVersion string) {
 		}),
 		Entry("Defaulter", func(b *WebhookBuilder[*TestDefaulterObject]) {
 			b.WithDefaulter(&testDefaulter{})
+		}),
+		Entry("Mutator", func(b *WebhookBuilder[*TestDefaulterObject]) {
+			b.WithMutator(&testMutator{})
 		}),
 	)
 
@@ -930,6 +939,25 @@ func runTests(admissionReviewVersion string) {
 		ExpectWithOffset(1, err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("only one of Validator or CustomValidator can be set"))
 	})
+	DescribeTable("should error if a mutator and another mutating handler are set",
+		func(build func(*WebhookBuilder[*TestDefaulterObject])) {
+			m, err := manager.New(cfg, manager.Options{})
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+			addToScheme(m.GetScheme())
+			webhookBuilder := WebhookManagedBy(m, &TestDefaulterObject{})
+			build(webhookBuilder)
+
+			err = webhookBuilder.Complete()
+			ExpectWithOffset(1, err).To(MatchError("only one of Mutator, Defaulter or CustomDefaulter can be set"))
+		},
+		Entry("Mutator and Defaulter", func(b *WebhookBuilder[*TestDefaulterObject]) {
+			b.WithMutator(&testMutator{}).WithDefaulter(&testDefaulter{})
+		}),
+		Entry("Mutator and CustomDefaulter", func(b *WebhookBuilder[*TestDefaulterObject]) {
+			b.WithMutator(&testMutator{}).WithCustomDefaulter(&TestCustomDefaulter{})
+		}),
+	)
 }
 
 // TestDefaulter.
@@ -1070,6 +1098,12 @@ func (*testDefaulter) Default(ctx context.Context, obj *TestDefaulterObject) err
 	}
 
 	return nil
+}
+
+type testMutator struct{}
+
+func (*testMutator) Mutate(ctx context.Context, obj *TestDefaulterObject) error {
+	return (&testDefaulter{}).Default(ctx, obj)
 }
 
 //nolint:staticcheck

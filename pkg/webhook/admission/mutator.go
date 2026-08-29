@@ -96,11 +96,12 @@ func (h *mutatorForType[T]) Handle(ctx context.Context, req Request) Response {
 	if err := h.decoder.Decode(req, obj); err != nil {
 		return Errored(http.StatusBadRequest, err)
 	}
-	before, ok := obj.DeepCopyObject().(T)
+	copied := obj.DeepCopyObject()
+	before, ok := copied.(T)
 	if !ok {
 		return Errored(http.StatusInternalServerError, fmt.Errorf(
 			"DeepCopyObject returned %T, expected %T",
-			obj.DeepCopyObject(),
+			copied,
 			obj,
 		))
 	}
