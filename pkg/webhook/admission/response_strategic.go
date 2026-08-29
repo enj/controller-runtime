@@ -447,11 +447,12 @@ func validateStrategicSlice(
 		if _, existed := beforeItems[key]; existed {
 			continue
 		}
+		projectedItem, projectedExists := projectedItems[key]
 		if err := validateStrategicProjection(
 			nil,
 			false,
-			projectedItems[key],
-			true,
+			projectedItem,
+			projectedExists,
 			nil,
 			false,
 			afterItem,
@@ -547,6 +548,9 @@ func hasCustomJSONSerialization(typ reflect.Type) bool {
 		return true
 	}
 	typ = indirectType(typ)
+	if typ == nil {
+		return false
+	}
 	return typ.Implements(jsonMarshalerType) ||
 		typ.Implements(jsonUnmarshalerType) ||
 		reflect.PointerTo(typ).Implements(jsonMarshalerType) ||
