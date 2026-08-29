@@ -142,6 +142,74 @@ var _ = Describe("Strategic merge admission responses", func() {
 			}`))
 		})
 
+		It("adds a typed field when its entire parent is omitted", func() {
+			original := []byte(`{
+				"apiVersion":"test.controller-runtime.io/v1",
+				"kind":"StrategicTestObject",
+				"unknown":"keep"
+			}`)
+			before := decodeStrategicTestObject(original)
+			after := before.DeepCopyObject().(*strategicTestObject)
+			after.Spec.Value = "added"
+
+			projected, err := projectTypedMutation(original, before, after)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(projected).To(MatchJSON(`{
+				"apiVersion":"test.controller-runtime.io/v1",
+				"kind":"StrategicTestObject",
+				"unknown":"keep",
+				"spec":{"value":"added"}
+			}`))
+		})
+
+		It("adds a typed field below an explicit null parent", func() {
+			original := []byte(`{
+				"apiVersion":"test.controller-runtime.io/v1",
+				"kind":"StrategicTestObject",
+				"spec":null
+			}`)
+			before := decodeStrategicTestObject(original)
+			after := before.DeepCopyObject().(*strategicTestObject)
+			after.Spec.Value = "added"
+
+			projected, err := projectTypedMutation(original, before, after)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(projected).To(MatchJSON(`{
+				"apiVersion":"test.controller-runtime.io/v1",
+				"kind":"StrategicTestObject",
+				"spec":{"value":"added"}
+			}`))
+		})
+
+		It("allows first writes to explicitly empty composite fields", func() {
+			original := []byte(`{
+				"apiVersion":"v1",
+				"kind":"Pod",
+				"spec":{
+					"labels":{},
+					"containers":[],
+					"atomic":[]
+				}
+			}`)
+			before := decodeStrategicTestObject(original)
+			after := before.DeepCopyObject().(*strategicTestObject)
+			after.Spec.Labels = map[string]string{"added": "value"}
+			after.Spec.Containers = []strategicTestItem{{Name: "added"}}
+			after.Spec.Atomic = []strategicTestItem{{Name: "added"}}
+
+			projected, err := projectTypedMutation(original, before, after)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(projected).To(MatchJSON(`{
+				"apiVersion":"v1",
+				"kind":"Pod",
+				"spec":{
+					"labels":{"added":"value"},
+					"containers":[{"name":"added"}],
+					"atomic":[{"name":"added"}]
+				}
+			}`))
+		})
+
 		It("safely replaces an explicit null and preserves unknown lists", func() {
 			original := []byte(`{
 				"apiVersion":"test.controller-runtime.io/v1",
@@ -264,7 +332,7 @@ var _ = Describe("Strategic merge admission responses", func() {
 			response := PatchResponseViaStrategicMerge(original, before, after)
 			Expect(response.Allowed).To(BeFalse())
 			Expect(response.Result.Code).To(Equal(int32(http.StatusInternalServerError)))
-			Expect(response.Result.Message).To(ContainSubstring("mutate an unstructured object or return explicit JSONPatch operations"))
+			Expect(response.Result.Message).To(ContainSubstring("operate on raw or unstructured data"))
 		})
 
 		It("rejects mismatched concrete types and before values", func() {
@@ -394,6 +462,7 @@ type strategicTestSpec struct {
 	Optional   *strategicTestSettings `json:"optional,omitempty"`
 	Containers []strategicTestItem    `json:"containers,omitempty" patchStrategy:"merge" patchMergeKey:"name"`
 	Atomic     []strategicTestItem    `json:"atomic,omitempty"`
+	Labels     map[string]string      `json:"labels,omitempty"`
 	Timestamp  metav1.Time            `json:"timestamp,omitempty"`
 }
 
@@ -407,15 +476,19 @@ type strategicTestItem struct {
 }
 
 func (o *strategicTestObject) DeepCopyObject() runtime.Object {
-	copy := *o
-	copy.Spec.Optional = nil
+	result := *o
+	result.Spec.Optional = nil
 	if o.Spec.Optional != nil {
 		optional := *o.Spec.Optional
-		copy.Spec.Optional = &optional
+		result.Spec.Optional = &optional
 	}
-	copy.Spec.Containers = slices.Clone(o.Spec.Containers)
-	copy.Spec.Atomic = slices.Clone(o.Spec.Atomic)
-	return &copy
+	result.Spec.Containers = slices.Clone(o.Spec.Containers)
+	result.Spec.Atomic = slices.Clone(o.Spec.Atomic)
+	result.Spec.Labels = make(map[string]string, len(o.Spec.Labels))
+	for key, value := range o.Spec.Labels {
+		result.Spec.Labels[key] = value
+	}
+	return &result
 }
 
 type otherStrategicTestObject struct {
@@ -423,8 +496,8 @@ type otherStrategicTestObject struct {
 }
 
 func (o *otherStrategicTestObject) DeepCopyObject() runtime.Object {
-	copy := *o
-	return &copy
+	result := *o
+	return &result
 }
 
 func decodeStrategicTestObject(data []byte) *strategicTestObject {

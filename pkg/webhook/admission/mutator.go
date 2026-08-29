@@ -32,7 +32,8 @@ import (
 // Mutator mutates an admission request object.
 //
 // Unlike Defaulter, Mutator uses strategic-merge semantics to preserve fields that are present in the admission
-// request but unknown to T. Mutations that cannot be proven safe are rejected.
+// request but unknown to T. Mutations that cannot be proven safe are rejected. The managed mutation handler is
+// intended for structured types; use a custom Handler to mutate raw or unstructured data.
 type Mutator[T runtime.Object] interface {
 	Mutate(ctx context.Context, obj T) error
 }

@@ -237,17 +237,18 @@ func (blder *WebhookBuilder[T]) registerDefaultingWebhook() error {
 
 func (blder *WebhookBuilder[T]) getDefaultingWebhook() (*admission.Webhook, error) {
 	var w *admission.Webhook
-	if blder.mutator != nil {
+	switch {
+	case blder.mutator != nil:
 		if blder.defaulter != nil || blder.customDefaulter != nil {
 			return nil, errors.New("only one of Mutator, Defaulter or CustomDefaulter can be set")
 		}
 		w = admission.WithMutator(blder.mgr.GetScheme(), blder.mutator)
-	} else if blder.defaulter != nil {
+	case blder.defaulter != nil:
 		if blder.customDefaulter != nil {
 			return nil, errors.New("only one of Defaulter or CustomDefaulter can be set")
 		}
 		w = admission.WithDefaulter(blder.mgr.GetScheme(), blder.defaulter, blder.customDefaulterOpts...)
-	} else if blder.customDefaulter != nil {
+	case blder.customDefaulter != nil:
 		w = admission.WithCustomDefaulter(blder.mgr.GetScheme(), blder.apiType, blder.customDefaulter, blder.customDefaulterOpts...)
 	}
 	if w != nil && blder.recoverPanic != nil {

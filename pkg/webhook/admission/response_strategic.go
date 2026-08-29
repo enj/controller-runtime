@@ -50,7 +50,7 @@ func PatchResponseViaStrategicMerge[T runtime.Object](original []byte, before, a
 	projected, err := projectTypedMutation(original, before, after)
 	if err != nil {
 		return Errored(http.StatusInternalServerError, fmt.Errorf(
-			"cannot safely project typed mutation: %w; mutate an unstructured object or return explicit JSONPatch operations",
+			"cannot safely project typed mutation: %w; operate on raw or unstructured data and return explicit JSONPatch operations instead",
 			err,
 		))
 	}
@@ -171,12 +171,15 @@ func matchingObjectType[T runtime.Object](before, after T) (reflect.Type, error)
 }
 
 func isNilValue(value reflect.Value) bool {
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+	if value.Kind() == reflect.Chan ||
+		value.Kind() == reflect.Func ||
+		value.Kind() == reflect.Interface ||
+		value.Kind() == reflect.Map ||
+		value.Kind() == reflect.Pointer ||
+		value.Kind() == reflect.Slice {
 		return value.IsNil()
-	default:
-		return false
 	}
+	return false
 }
 
 func decodeAndMarshalObject(data []byte, objectType reflect.Type) ([]byte, error) {
@@ -235,19 +238,11 @@ func validateStrategicProjection(
 		return nil
 	}
 
-	// A field absent from the original JSON can still be present in the typed representation when a non-pointer
-	// struct or a field without omitempty is decoded. It contains no raw-only data, so use the typed value as its
-	// baseline. This is the case described in kubernetes-sigs/kubebuilder#510.
-	if !originalExists && beforeExists {
-		original = before
-		originalExists = true
-	}
-
 	if !beforeExists {
 		if !afterExists || !projectedExists {
 			return unsafeStrategicChange(path, "typed addition is missing from the projected JSON")
 		}
-		if originalExists && isJSONComposite(original) {
+		if originalExists && isNonEmptyJSONComposite(original) {
 			return unsafeStrategicChange(path, "typed addition would replace unrepresented composite data")
 		}
 		if !reflect.DeepEqual(projected, after) {
@@ -268,7 +263,11 @@ func validateStrategicProjection(
 	if hasCustomJSONSerialization(valueType.typ) {
 		return unsafeStrategicChange(path, "changed value uses custom JSON serialization")
 	}
-	if indirectType(valueType.typ).Kind() == reflect.Interface {
+	indirectValueType := indirectType(valueType.typ)
+	if indirectValueType == nil {
+		return unsafeStrategicChange(path, "cannot resolve changed value type")
+	}
+	if indirectValueType.Kind() == reflect.Interface {
 		return unsafeStrategicChange(path, "changed value has an interface type")
 	}
 
@@ -278,9 +277,12 @@ func validateStrategicProjection(
 		if !ok {
 			return requireProjectedValue(path, projected, after)
 		}
-		rawMap, ok := original.(map[string]any)
-		if !ok {
-			return unsafeStrategicChange(path, "typed object does not match original JSON")
+		rawMap := map[string]any{}
+		if originalExists && original != nil {
+			rawMap, ok = original.(map[string]any)
+			if !ok {
+				return unsafeStrategicChange(path, "typed object does not match original JSON")
+			}
 		}
 		projectedMap, ok := projected.(map[string]any)
 		if !ok {
@@ -292,9 +294,12 @@ func validateStrategicProjection(
 		if !ok {
 			return requireProjectedValue(path, projected, after)
 		}
-		rawSlice, ok := original.([]any)
-		if !ok {
-			return unsafeStrategicChange(path, "typed list does not match original JSON")
+		rawSlice := []any{}
+		if originalExists {
+			rawSlice, ok = original.([]any)
+			if !ok {
+				return unsafeStrategicChange(path, "typed list does not match original JSON")
+			}
 		}
 		projectedSlice, ok := projected.([]any)
 		if !ok {
@@ -404,7 +409,11 @@ func validateStrategicSlice(
 		return unsafeStrategicChange(path, "projected merge-list keys do not match the typed after value")
 	}
 
-	elementType := strategicJSONType{typ: indirectType(valueType.typ).Elem()}
+	listType := indirectType(valueType.typ)
+	if listType == nil || (listType.Kind() != reflect.Slice && listType.Kind() != reflect.Array) {
+		return unsafeStrategicChange(path, "cannot resolve merge-list element type")
+	}
+	elementType := strategicJSONType{typ: listType.Elem()}
 	for key, beforeItem := range beforeItems {
 		afterItem, remains := afterItems[key]
 		originalItem := originalItems[key]
@@ -458,8 +467,10 @@ func validateStrategicSlice(
 
 func strategicChildType(parentType reflect.Type, key string) (strategicJSONType, error) {
 	parentType = indirectType(parentType)
-	switch parentType.Kind() {
-	case reflect.Struct:
+	if parentType == nil {
+		return strategicJSONType{}, fmt.Errorf("parent type is unknown")
+	}
+	if parentType.Kind() == reflect.Struct {
 		child, patchMeta, err := (strategicpatch.PatchMetaFromStruct{T: parentType}).LookupPatchMetadataForStruct(key)
 		if err != nil {
 			return strategicJSONType{}, err
@@ -469,11 +480,11 @@ func strategicChildType(parentType reflect.Type, key string) (strategicJSONType,
 			return strategicJSONType{}, fmt.Errorf("unexpected metadata type %T", child)
 		}
 		return strategicJSONType{typ: childFromStruct.T, patchMeta: patchMeta}, nil
-	case reflect.Map:
-		return strategicJSONType{typ: parentType.Elem()}, nil
-	default:
-		return strategicJSONType{}, fmt.Errorf("expected struct or map, got %v", parentType)
 	}
+	if parentType.Kind() == reflect.Map {
+		return strategicJSONType{typ: parentType.Elem()}, nil
+	}
+	return strategicJSONType{}, fmt.Errorf("expected struct or map, got %v", parentType)
 }
 
 func hasPatchStrategy(patchMeta strategicpatch.PatchMeta, strategy string) bool {
@@ -549,10 +560,12 @@ func indirectType(typ reflect.Type) reflect.Type {
 	return typ
 }
 
-func isJSONComposite(value any) bool {
-	switch value.(type) {
-	case map[string]any, []any:
-		return true
+func isNonEmptyJSONComposite(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		return len(typed) != 0
+	case []any:
+		return len(typed) != 0
 	default:
 		return false
 	}
