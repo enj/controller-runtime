@@ -44,6 +44,7 @@ type CustomDefaulter = Defaulter[runtime.Object]
 
 type defaulterOptions struct {
 	removeUnknownOrOmitableFields bool
+	useSafeStrategicMerge         bool
 }
 
 // DefaulterOption defines the type of a CustomDefaulter's option
@@ -56,17 +57,22 @@ func DefaulterRemoveUnknownOrOmitableFields(o *defaulterOptions) {
 	o.removeUnknownOrOmitableFields = true
 }
 
+// DefaulterUseSafeStrategicMerge makes the defaulter project typed changes onto the original request using
+// strategic-merge semantics. The projection is rejected unless it can be verified to preserve data not represented by
+// the typed object. This option cannot be combined with DefaulterRemoveUnknownOrOmitableFields.
+func DefaulterUseSafeStrategicMerge(o *defaulterOptions) {
+	o.useSafeStrategicMerge = true
+}
+
 // WithDefaulter creates a new Webhook for a Defaulter interface.
 func WithDefaulter[T runtime.Object](scheme *runtime.Scheme, defaulter Defaulter[T], opts ...DefaulterOption) *Webhook {
-	options := &defaulterOptions{}
-	for _, o := range opts {
-		o(options)
-	}
+	options := applyDefaulterOptions(opts)
 	return &Webhook{
 		Handler: &defaulterForType[T]{
 			defaulter:                     defaulter,
 			decoder:                       NewDecoder(scheme),
 			removeUnknownOrOmitableFields: options.removeUnknownOrOmitableFields,
+			useSafeStrategicMerge:         options.useSafeStrategicMerge,
 			new: func() T {
 				var zero T
 				typ := reflect.TypeOf(zero)
@@ -81,24 +87,34 @@ func WithDefaulter[T runtime.Object](scheme *runtime.Scheme, defaulter Defaulter
 
 // WithCustomDefaulter creates a new Webhook for a CustomDefaulter interface.
 func WithCustomDefaulter(scheme *runtime.Scheme, obj runtime.Object, defaulter CustomDefaulter, opts ...DefaulterOption) *Webhook {
-	options := &defaulterOptions{}
-	for _, o := range opts {
-		o(options)
-	}
+	options := applyDefaulterOptions(opts)
 	return &Webhook{
 		Handler: &defaulterForType[runtime.Object]{
 			defaulter:                     defaulter,
 			decoder:                       NewDecoder(scheme),
 			removeUnknownOrOmitableFields: options.removeUnknownOrOmitableFields,
+			useSafeStrategicMerge:         options.useSafeStrategicMerge,
 			new:                           func() runtime.Object { return obj.DeepCopyObject() },
 		},
 	}
+}
+
+func applyDefaulterOptions(opts []DefaulterOption) *defaulterOptions {
+	options := &defaulterOptions{}
+	for _, o := range opts {
+		o(options)
+	}
+	if options.removeUnknownOrOmitableFields && options.useSafeStrategicMerge {
+		panic("DefaulterUseSafeStrategicMerge cannot be combined with DefaulterRemoveUnknownOrOmitableFields")
+	}
+	return options
 }
 
 type defaulterForType[T runtime.Object] struct {
 	defaulter                     Defaulter[T]
 	decoder                       Decoder
 	removeUnknownOrOmitableFields bool
+	useSafeStrategicMerge         bool
 	new                           func() T
 }
 
@@ -153,6 +169,10 @@ func (h *defaulterForType[T]) Handle(ctx context.Context, req Request) Response 
 				Allowed: true,
 			},
 		}
+	}
+
+	if h.useSafeStrategicMerge {
+		return PatchResponseViaStrategicMerge(req.Object.Raw, originalObj, obj)
 	}
 
 	// Create the patch

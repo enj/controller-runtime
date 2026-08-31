@@ -39,7 +39,6 @@ import (
 // WebhookBuilder builds a Webhook.
 type WebhookBuilder[T runtime.Object] struct {
 	apiType                   runtime.Object
-	mutator                   admission.Mutator[T]
 	customDefaulter           admission.CustomDefaulter //nolint:staticcheck
 	defaulter                 admission.Defaulter[T]
 	customDefaulterOpts       []admission.DefaulterOption
@@ -76,12 +75,6 @@ func (blder *WebhookBuilder[T]) WithCustomDefaulter(defaulter admission.CustomDe
 func (blder *WebhookBuilder[T]) WithDefaulter(defaulter admission.Defaulter[T], opts ...admission.DefaulterOption) *WebhookBuilder[T] {
 	blder.defaulter = defaulter
 	blder.customDefaulterOpts = opts
-	return blder
-}
-
-// WithMutator sets up the provided admission.Mutator in a mutating webhook.
-func (blder *WebhookBuilder[T]) WithMutator(mutator admission.Mutator[T]) *WebhookBuilder[T] {
-	blder.mutator = mutator
 	return blder
 }
 
@@ -237,18 +230,12 @@ func (blder *WebhookBuilder[T]) registerDefaultingWebhook() error {
 
 func (blder *WebhookBuilder[T]) getDefaultingWebhook() (*admission.Webhook, error) {
 	var w *admission.Webhook
-	switch {
-	case blder.mutator != nil:
-		if blder.defaulter != nil || blder.customDefaulter != nil {
-			return nil, errors.New("only one of Mutator, Defaulter or CustomDefaulter can be set")
-		}
-		w = admission.WithMutator(blder.mgr.GetScheme(), blder.mutator)
-	case blder.defaulter != nil:
+	if blder.defaulter != nil {
 		if blder.customDefaulter != nil {
 			return nil, errors.New("only one of Defaulter or CustomDefaulter can be set")
 		}
 		w = admission.WithDefaulter(blder.mgr.GetScheme(), blder.defaulter, blder.customDefaulterOpts...)
-	case blder.customDefaulter != nil:
+	} else if blder.customDefaulter != nil {
 		w = admission.WithCustomDefaulter(blder.mgr.GetScheme(), blder.apiType, blder.customDefaulter, blder.customDefaulterOpts...)
 	}
 	if w != nil && blder.recoverPanic != nil {

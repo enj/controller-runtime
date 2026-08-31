@@ -361,7 +361,7 @@ var _ = Describe("Strategic merge admission responses", func() {
 		})
 	})
 
-	Describe("WithMutator", func() {
+	Describe("WithDefaulter using safe strategic merge", func() {
 		var scheme *runtime.Scheme
 
 		BeforeEach(func() {
@@ -373,7 +373,7 @@ var _ = Describe("Strategic merge admission responses", func() {
 			metav1.AddToGroupVersion(scheme, strategicTestGroupVersion)
 		})
 
-		It("owns decoding, snapshotting, mutation, and safe response generation", func(ctx SpecContext) {
+		It("owns decoding, snapshotting, defaulting, and safe response generation", func(ctx SpecContext) {
 			original := []byte(`{
 				"apiVersion":"test.controller-runtime.io/v1",
 				"kind":"StrategicTestObject",
@@ -382,13 +382,13 @@ var _ = Describe("Strategic merge admission responses", func() {
 					"unknown":{"nested":"keep"}
 				}
 			}`)
-			handler := WithMutator(scheme, MutatorFunc[*strategicTestObject](func(ctx context.Context, obj *strategicTestObject) error {
+			handler := WithDefaulter(scheme, strategicTestDefaulter(func(ctx context.Context, obj *strategicTestObject) error {
 				req, err := RequestFromContext(ctx)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(req.Operation).To(Equal(admissionv1.Create))
 				obj.Spec.Value = "after"
 				return nil
-			}))
+			}), DefaulterUseSafeStrategicMerge)
 
 			response := handler.Handle(ctx, strategicTestRequest(admissionv1.Create, original))
 			Expect(response.Allowed).To(BeTrue())
@@ -403,16 +403,16 @@ var _ = Describe("Strategic merge admission responses", func() {
 			}`))
 		})
 
-		It("fails closed when a mutation cannot be projected safely", func(ctx SpecContext) {
+		It("fails closed when defaults cannot be projected safely", func(ctx SpecContext) {
 			original := []byte(`{
 				"apiVersion":"test.controller-runtime.io/v1",
 				"kind":"StrategicTestObject",
 				"spec":{"atomic":[{"name":"one","image":"old","future":"keep"}]}
 			}`)
-			handler := WithMutator(scheme, MutatorFunc[*strategicTestObject](func(_ context.Context, obj *strategicTestObject) error {
+			handler := WithDefaulter(scheme, strategicTestDefaulter(func(_ context.Context, obj *strategicTestObject) error {
 				obj.Spec.Atomic[0].Image = "new"
 				return nil
-			}))
+			}), DefaulterUseSafeStrategicMerge)
 
 			response := handler.Handle(ctx, strategicTestRequest(admissionv1.Update, original))
 			Expect(response.Allowed).To(BeFalse())
@@ -420,10 +420,10 @@ var _ = Describe("Strategic merge admission responses", func() {
 			Expect(response.Result.Message).To(ContainSubstring("cannot safely project typed mutation"))
 		})
 
-		It("skips deletes without invoking the mutator", func(ctx SpecContext) {
-			handler := WithMutator(scheme, MutatorFunc[*strategicTestObject](func(context.Context, *strategicTestObject) error {
+		It("skips deletes without invoking the defaulter", func(ctx SpecContext) {
+			handler := WithDefaulter(scheme, strategicTestDefaulter(func(context.Context, *strategicTestObject) error {
 				return errors.New("must not be called")
-			}))
+			}), DefaulterUseSafeStrategicMerge)
 
 			response := handler.Handle(ctx, strategicTestRequest(admissionv1.Delete, nil))
 			Expect(response.Allowed).To(BeTrue())
@@ -431,9 +431,13 @@ var _ = Describe("Strategic merge admission responses", func() {
 		})
 
 		It("propagates API status errors and rejects malformed requests", func(ctx SpecContext) {
-			handler := WithMutator(scheme, MutatorFunc[*strategicTestObject](func(context.Context, *strategicTestObject) error {
-				return apierrors.NewBadRequest("invalid mutation")
-			}))
+			handler := WithDefaulter(
+				scheme,
+				strategicTestDefaulter(func(context.Context, *strategicTestObject) error {
+					return apierrors.NewBadRequest("invalid defaults")
+				}),
+				DefaulterUseSafeStrategicMerge,
+			)
 
 			response := handler.Handle(ctx, strategicTestRequest(admissionv1.Create, []byte(`{
 				"apiVersion":"test.controller-runtime.io/v1",
@@ -441,11 +445,32 @@ var _ = Describe("Strategic merge admission responses", func() {
 			}`)))
 			Expect(response.Allowed).To(BeFalse())
 			Expect(response.Result.Code).To(Equal(int32(http.StatusBadRequest)))
-			Expect(response.Result.Message).To(ContainSubstring("invalid mutation"))
+			Expect(response.Result.Message).To(ContainSubstring("invalid defaults"))
 
 			response = handler.Handle(ctx, strategicTestRequest(admissionv1.Create, []byte(`{`)))
 			Expect(response.Allowed).To(BeFalse())
 			Expect(response.Result.Code).To(Equal(int32(http.StatusBadRequest)))
+		})
+
+		It("leaves the existing behavior selected by default", func() {
+			handler := WithDefaulter(
+				scheme,
+				strategicTestDefaulter(func(context.Context, *strategicTestObject) error { return nil }),
+			)
+
+			typedHandler := handler.Handler.(*defaulterForType[*strategicTestObject])
+			Expect(typedHandler.useSafeStrategicMerge).To(BeFalse())
+		})
+
+		It("rejects conflicting field-preservation options", func() {
+			Expect(func() {
+				WithDefaulter(
+					scheme,
+					strategicTestDefaulter(func(context.Context, *strategicTestObject) error { return nil }),
+					DefaulterUseSafeStrategicMerge,
+					DefaulterRemoveUnknownOrOmitableFields,
+				)
+			}).To(PanicWith("DefaulterUseSafeStrategicMerge cannot be combined with DefaulterRemoveUnknownOrOmitableFields"))
 		})
 	})
 })
@@ -474,6 +499,12 @@ type strategicTestSettings struct {
 type strategicTestItem struct {
 	Name  string `json:"name"`
 	Image string `json:"image,omitempty"`
+}
+
+type strategicTestDefaulter func(context.Context, *strategicTestObject) error
+
+func (f strategicTestDefaulter) Default(ctx context.Context, obj *strategicTestObject) error {
+	return f(ctx, obj)
 }
 
 func (o *strategicTestObject) DeepCopyObject() runtime.Object {
